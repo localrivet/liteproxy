@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,6 +64,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Get or create proxy for this route
 	proxy := h.getProxy(route)
+
+	// Strip the path prefix before proxying
+	// e.g., /api/users with prefix /api becomes /users
+	if route.PathPrefix != "/" {
+		originalPath := r.URL.Path
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, route.PathPrefix)
+		if r.URL.Path == "" {
+			r.URL.Path = "/"
+		}
+		// Also update RawPath if set
+		if r.URL.RawPath != "" {
+			r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, route.PathPrefix)
+			if r.URL.RawPath == "" {
+				r.URL.RawPath = "/"
+			}
+		}
+		log.Printf("proxy: %s%s -> %s:%d%s", host, originalPath, route.ServiceName, route.ServicePort, r.URL.Path)
+	}
+
 	proxy.ServeHTTP(w, r)
 }
 

@@ -12,15 +12,23 @@ A lightweight reverse proxy that reads Docker Compose files and routes traffic b
 
 ## Quick Start
 
+**Important:** Liteproxy must run inside Docker Compose to resolve service names. Service names like `marketing` or `api` only resolve within Docker's network.
+
 ```bash
-# Build
+# Try the example
+docker compose -f example-compose.yaml up --build
+
+# Test routing
+curl -H "Host: example.com" http://localhost:8080/        # → nginx
+curl -H "Host: example.com" http://localhost:8080/api     # → api service
+curl -I -H "Host: www.example.com" http://localhost:8080/ # → 301 redirect
+```
+
+For local development without Docker:
+```bash
 go build -o liteproxy .
-
-# Run (HTTP only for development)
 LITEPROXY_HTTPS_ENABLED=false ./liteproxy
-
-# Run with HTTPS
-LITEPROXY_ACME_EMAIL=you@example.com ./liteproxy
+# Note: upstream services won't resolve unless you add them to /etc/hosts
 ```
 
 ## How It Works
@@ -106,6 +114,14 @@ With this configuration:
 ```
 example.com/api/users  → matches /api  → api service
 example.com/about      → matches /     → marketing service
+```
+
+**Path stripping:** The path prefix is stripped before forwarding to the upstream service.
+
+```
+Request: example.com/api/users
+Route:   /api → api:8080
+Upstream receives: /users
 ```
 
 **Redirects:** Requests to `redirect_from` domains return 301 to the primary host, preserving the path and query string.

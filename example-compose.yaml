@@ -1,0 +1,32 @@
+# Example: Run with docker compose -f example-compose.yaml up
+# Then test with: curl -H "Host: example.com" http://localhost:8080/
+
+services:
+  liteproxy:
+    build: .
+    ports:
+      - "9999:80"
+    volumes:
+      - ./example-compose.yaml:/etc/liteproxy/compose.yaml:ro
+    environment:
+      LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      LITEPROXY_HTTPS_ENABLED: "false"
+      LITEPROXY_WATCH: "true"
+    depends_on:
+      - web
+      - api
+
+  web:
+    image: nginx:alpine
+    labels:
+      liteproxy.host: "example.com"
+      liteproxy.port: "80"
+      liteproxy.redirect_from: "www.example.com"
+
+  api:
+    image: hashicorp/http-echo
+    command: ["-text=Hello from API", "-listen=:8080"]
+    labels:
+      liteproxy.host: "example.com"
+      liteproxy.port: "8080"
+      liteproxy.path: "/api"
