@@ -1,6 +1,9 @@
 # Binary
 liteproxy
 
+# Coverage
+coverage.out
+
 # Certificates
 certs/
 *.pem
