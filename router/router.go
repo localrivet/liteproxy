@@ -58,13 +58,41 @@ func (r *Router) Match(host, path string) *compose.Route {
 		host = host[:idx]
 	}
 
+	// Normalize empty path to /
+	if path == "" {
+		path = "/"
+	}
+
 	for i := range r.routes {
 		route := &r.routes[i]
-		if route.Host == host && strings.HasPrefix(path, route.PathPrefix) {
+		if route.Host != host {
+			continue
+		}
+		// Check path prefix match with proper boundary checking
+		if matchesPathPrefix(path, route.PathPrefix) {
 			return route
 		}
 	}
 	return nil
+}
+
+// matchesPathPrefix checks if path matches the prefix with proper path boundary handling
+// e.g., /api matches /api, /api/, /api/users but NOT /apiv2
+func matchesPathPrefix(path, prefix string) bool {
+	if !strings.HasPrefix(path, prefix) {
+		return false
+	}
+	// If prefix is / or ends with /, the HasPrefix check is sufficient
+	if prefix == "/" || strings.HasSuffix(prefix, "/") {
+		return true
+	}
+	// Check that the match is at a path boundary
+	// Either exact match, or followed by /
+	if len(path) == len(prefix) {
+		return true // exact match
+	}
+	// path is longer than prefix, check next char is /
+	return path[len(prefix)] == '/'
 }
 
 // Redirect checks if the host should redirect, returns target route or nil

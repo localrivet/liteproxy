@@ -281,3 +281,141 @@ func TestLongestPrefixOrdering(t *testing.T) {
 		})
 	}
 }
+
+func TestPathEdgeCases(t *testing.T) {
+	routes := []compose.Route{
+		{Host: "example.com", PathPrefix: "/api", ServiceName: "api", ServicePort: 80},
+		{Host: "example.com", PathPrefix: "/", ServiceName: "root", ServicePort: 80},
+	}
+	r := New(routes)
+
+	tests := []struct {
+		name        string
+		path        string
+		wantService string
+		wantNil     bool
+	}{
+		{
+			name:        "exact match /api",
+			path:        "/api",
+			wantService: "api",
+		},
+		{
+			name:        "with trailing slash /api/",
+			path:        "/api/",
+			wantService: "api",
+		},
+		{
+			name:        "subpath /api/users",
+			path:        "/api/users",
+			wantService: "api",
+		},
+		{
+			name:        "similar prefix /apiv2 should match root",
+			path:        "/apiv2",
+			wantService: "root", // /apiv2 doesn't start with /api/ or equal /api
+		},
+		{
+			name:        "encoded path /api/%2F",
+			path:        "/api/%2F",
+			wantService: "api",
+		},
+		{
+			name:        "path with query-like chars /api/users?foo",
+			path:        "/api/users?foo", // Note: this is path, not query string
+			wantService: "api",
+		},
+		{
+			name:        "empty path",
+			path:        "",
+			wantService: "root",
+		},
+		{
+			name:        "double slash /api//users",
+			path:        "/api//users",
+			wantService: "api",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			route := r.Match("example.com", tt.path)
+			if tt.wantNil {
+				if route != nil {
+					t.Errorf("Match(%q) = %v, want nil", tt.path, route)
+				}
+				return
+			}
+			if route == nil {
+				t.Fatalf("Match(%q) = nil, want route", tt.path)
+			}
+			if route.ServiceName != tt.wantService {
+				t.Errorf("Match(%q).ServiceName = %q, want %q", tt.path, route.ServiceName, tt.wantService)
+			}
+		})
+	}
+}
+
+func TestTrailingSlashInPrefix(t *testing.T) {
+	// Test that prefix with trailing slash works correctly
+	routes := []compose.Route{
+		{Host: "example.com", PathPrefix: "/api/", ServiceName: "api-slash", ServicePort: 80},
+		{Host: "example.com", PathPrefix: "/", ServiceName: "root", ServicePort: 80},
+	}
+	r := New(routes)
+
+	tests := []struct {
+		path        string
+		wantService string
+	}{
+		{"/api/", "api-slash"},
+		{"/api/users", "api-slash"},
+		{"/api", "root"}, // /api doesn't match /api/ prefix
+		{"/", "root"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			route := r.Match("example.com", tt.path)
+			if route == nil {
+				t.Fatalf("Match(%q) = nil", tt.path)
+			}
+			if route.ServiceName != tt.wantService {
+				t.Errorf("Match(%q).ServiceName = %q, want %q", tt.path, route.ServiceName, tt.wantService)
+			}
+		})
+	}
+}
+
+func TestCaseSensitivity(t *testing.T) {
+	routes := []compose.Route{
+		{Host: "Example.COM", PathPrefix: "/API", ServiceName: "api", ServicePort: 80},
+	}
+	r := New(routes)
+
+	// Hosts are typically case-insensitive, but our implementation is case-sensitive
+	// Paths are case-sensitive
+	tests := []struct {
+		name    string
+		host    string
+		path    string
+		wantNil bool
+	}{
+		{"exact match", "Example.COM", "/API", false},
+		{"lowercase host", "example.com", "/API", true},
+		{"lowercase path", "Example.COM", "/api", true},
+		{"all lowercase", "example.com", "/api", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			route := r.Match(tt.host, tt.path)
+			if tt.wantNil && route != nil {
+				t.Errorf("Match(%q, %q) should be nil", tt.host, tt.path)
+			}
+			if !tt.wantNil && route == nil {
+				t.Errorf("Match(%q, %q) should not be nil", tt.host, tt.path)
+			}
+		})
+	}
+}
