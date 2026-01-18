@@ -1,0 +1,32 @@
+services:
+  liteproxy:
+    image: liteproxy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./compose.yaml:/etc/liteproxy/compose.yaml:ro
+      - ./certs:/certs
+    environment:
+      LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      LITEPROXY_ACME_EMAIL: you@example.com
+      LITEPROXY_ACME_DIR: /certs
+      LITEPROXY_WATCH: "true"
+
+  marketing:
+    image: nginx:alpine
+    labels:
+      liteproxy.host: "example.com"
+      liteproxy.port: "80"
+      liteproxy.redirect_from: "www.example.com"
+
+  api:
+    image: nginx:alpine
+    labels:
+      liteproxy.host: "example.com"
+      liteproxy.port: "8080"
+      liteproxy.path: "/api"
+
+  redis:
+    image: redis:alpine
+    # no labels = not proxied
