@@ -63,6 +63,7 @@ Add these labels to any service you want to proxy:
 | `liteproxy.host` | yes | — | Domain to match |
 | `liteproxy.port` | yes | — | Container port to proxy to |
 | `liteproxy.path` | no | `/` | Path prefix (longest match wins) |
+| `liteproxy.strip_prefix` | no | `true` | Strip path prefix before forwarding |
 | `liteproxy.redirect_from` | no | — | Comma-separated domains to 301 redirect |
 | `liteproxy.passhost` | no | `false` | Pass original Host header to upstream |
 
@@ -116,12 +117,22 @@ example.com/api/users  → matches /api  → api service
 example.com/about      → matches /     → marketing service
 ```
 
-**Path stripping:** The path prefix is stripped before forwarding to the upstream service.
+**Path stripping:** By default, the path prefix is stripped before forwarding to upstream.
 
 ```
 Request: example.com/api/users
 Route:   /api → api:8080
 Upstream receives: /users
+```
+
+To preserve the full path, set `liteproxy.strip_prefix: "false"`:
+
+```yaml
+labels:
+  liteproxy.host: "example.com"
+  liteproxy.port: "8080"
+  liteproxy.path: "/api"
+  liteproxy.strip_prefix: "false"  # upstream receives /api/users
 ```
 
 **Redirects:** Requests to `redirect_from` domains return 301 to the primary host, preserving the path and query string.

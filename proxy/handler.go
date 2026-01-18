@@ -65,9 +65,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Get or create proxy for this route
 	proxy := h.getProxy(route)
 
-	// Strip the path prefix before proxying
+	// Strip the path prefix before proxying (if enabled)
 	// e.g., /api/users with prefix /api becomes /users
-	if route.PathPrefix != "/" {
+	if route.StripPrefix && route.PathPrefix != "/" {
 		originalPath := r.URL.Path
 		r.URL.Path = strings.TrimPrefix(r.URL.Path, route.PathPrefix)
 		if r.URL.Path == "" {

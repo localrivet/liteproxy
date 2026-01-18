@@ -17,6 +17,7 @@ const (
 	LabelPath         = "liteproxy.path"
 	LabelRedirectFrom = "liteproxy.redirect_from"
 	LabelPassHost     = "liteproxy.passhost"
+	LabelStripPrefix  = "liteproxy.strip_prefix"
 )
 
 // Route represents a single routing rule extracted from compose labels
@@ -26,6 +27,7 @@ type Route struct {
 	ServiceName    string
 	ServicePort    int
 	PassHostHeader bool
+	StripPrefix    bool
 	RedirectFrom   []string
 }
 
@@ -101,6 +103,7 @@ func extractRoute(service types.ServiceConfig) (*Route, error) {
 		ServiceName: service.Name,
 		ServicePort: port,
 		PathPrefix:  "/",
+		StripPrefix: true, // default to stripping
 	}
 
 	// Optional: path prefix
@@ -111,6 +114,11 @@ func extractRoute(service types.ServiceConfig) (*Route, error) {
 	// Optional: passhost
 	if passhost := labels[LabelPassHost]; passhost != "" {
 		route.PassHostHeader = passhost == "true"
+	}
+
+	// Optional: strip_prefix (defaults to true)
+	if stripPrefix := labels[LabelStripPrefix]; stripPrefix != "" {
+		route.StripPrefix = stripPrefix != "false"
 	}
 
 	// Optional: redirect_from (comma-separated)
