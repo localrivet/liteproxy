@@ -419,3 +419,157 @@ func TestCaseSensitivity(t *testing.T) {
 		})
 	}
 }
+
+func TestWildcardHostMatch(t *testing.T) {
+	routes := []compose.Route{
+		{Host: "tenant.com", PathPrefix: "/", ServiceName: "marketing", ServicePort: 80,
+			RedirectFrom: []string{"www.tenant.com"}},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "tenant-app", ServicePort: 8080},
+	}
+	r := New(routes)
+
+	tests := []struct {
+		name        string
+		host        string
+		path        string
+		wantService string
+		wantNil     bool
+	}{
+		{
+			name:        "exact host match - apex domain",
+			host:        "tenant.com",
+			path:        "/",
+			wantService: "marketing",
+		},
+		{
+			name:        "wildcard match - acme subdomain",
+			host:        "acme.tenant.com",
+			path:        "/",
+			wantService: "tenant-app",
+		},
+		{
+			name:        "wildcard match - another subdomain",
+			host:        "bigcorp.tenant.com",
+			path:        "/",
+			wantService: "tenant-app",
+		},
+		{
+			name:        "wildcard match with path",
+			host:        "acme.tenant.com",
+			path:        "/dashboard",
+			wantService: "tenant-app",
+		},
+		{
+			name:    "no match - different domain",
+			host:    "other.com",
+			path:    "/",
+			wantNil: true,
+		},
+		{
+			name:    "no match - deeper subdomain",
+			host:    "sub.acme.tenant.com",
+			path:    "/",
+			wantNil: true, // *.tenant.com doesn't match sub.acme.tenant.com
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			route := r.Match(tt.host, tt.path)
+			if tt.wantNil {
+				if route != nil {
+					t.Errorf("Match(%q, %q) = %v, want nil", tt.host, tt.path, route.ServiceName)
+				}
+				return
+			}
+			if route == nil {
+				t.Fatalf("Match(%q, %q) = nil, want route", tt.host, tt.path)
+			}
+			if route.ServiceName != tt.wantService {
+				t.Errorf("Match(%q, %q).ServiceName = %q, want %q", tt.host, tt.path, route.ServiceName, tt.wantService)
+			}
+		})
+	}
+}
+
+func TestWildcardRedirectPriority(t *testing.T) {
+	// www.tenant.com should redirect, not match wildcard
+	routes := []compose.Route{
+		{Host: "tenant.com", PathPrefix: "/", ServiceName: "marketing", ServicePort: 80,
+			RedirectFrom: []string{"www.tenant.com"}},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "tenant-app", ServicePort: 8080},
+	}
+	r := New(routes)
+
+	// www.tenant.com should redirect to tenant.com
+	redirect := r.Redirect("www.tenant.com")
+	if redirect == nil {
+		t.Fatal("Redirect(www.tenant.com) = nil, want redirect to tenant.com")
+	}
+	if redirect.Host != "tenant.com" {
+		t.Errorf("Redirect(www.tenant.com).Host = %q, want %q", redirect.Host, "tenant.com")
+	}
+
+	// Other subdomains should not redirect
+	if r.Redirect("acme.tenant.com") != nil {
+		t.Error("Redirect(acme.tenant.com) should be nil")
+	}
+}
+
+func TestWildcardWithPathPrefixes(t *testing.T) {
+	routes := []compose.Route{
+		{Host: "*.tenant.com", PathPrefix: "/api", ServiceName: "api", ServicePort: 8080},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "app", ServicePort: 3000},
+	}
+	r := New(routes)
+
+	tests := []struct {
+		host        string
+		path        string
+		wantService string
+	}{
+		{"acme.tenant.com", "/", "app"},
+		{"acme.tenant.com", "/dashboard", "app"},
+		{"acme.tenant.com", "/api", "api"},
+		{"acme.tenant.com", "/api/users", "api"},
+		{"bigcorp.tenant.com", "/api/v2", "api"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.host+tt.path, func(t *testing.T) {
+			route := r.Match(tt.host, tt.path)
+			if route == nil {
+				t.Fatalf("Match(%q, %q) = nil", tt.host, tt.path)
+			}
+			if route.ServiceName != tt.wantService {
+				t.Errorf("Match(%q, %q).ServiceName = %q, want %q", tt.host, tt.path, route.ServiceName, tt.wantService)
+			}
+		})
+	}
+}
+
+func TestHostsIncludesWildcards(t *testing.T) {
+	routes := []compose.Route{
+		{Host: "tenant.com", PathPrefix: "/", ServiceName: "marketing", ServicePort: 80,
+			RedirectFrom: []string{"www.tenant.com"}},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "tenant-app", ServicePort: 8080},
+	}
+	r := New(routes)
+
+	hosts := r.Hosts()
+	expected := map[string]bool{
+		"tenant.com":     true,
+		"www.tenant.com": true,
+		"*.tenant.com":   true,
+	}
+
+	if len(hosts) != len(expected) {
+		t.Errorf("Hosts() returned %d hosts, want %d: %v", len(hosts), len(expected), hosts)
+	}
+
+	for _, h := range hosts {
+		if !expected[h] {
+			t.Errorf("Hosts() contains unexpected host %q", h)
+		}
+	}
+}

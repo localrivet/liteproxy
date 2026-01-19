@@ -11,7 +11,8 @@ import (
 // Router holds the routing table with thread-safe access
 type Router struct {
 	mu        sync.RWMutex
-	routes    []compose.Route
+	routes    []compose.Route           // exact host routes (sorted by path length)
+	wildcards []compose.Route           // wildcard host routes (*.example.com)
 	redirects map[string]*compose.Route // redirect domain → target route
 }
 
@@ -29,15 +30,28 @@ func (r *Router) Update(routes []compose.Route) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Sort routes by path length descending (longest prefix first)
-	sorted := make([]compose.Route, len(routes))
-	copy(sorted, routes)
-	sort.Slice(sorted, func(i, j int) bool {
-		return len(sorted[i].PathPrefix) > len(sorted[j].PathPrefix)
-	})
-	r.routes = sorted
+	// Separate exact and wildcard routes
+	var exact, wildcards []compose.Route
+	for _, route := range routes {
+		if strings.HasPrefix(route.Host, "*.") {
+			wildcards = append(wildcards, route)
+		} else {
+			exact = append(exact, route)
+		}
+	}
 
-	// Build redirect map
+	// Sort both by path length descending (longest prefix first)
+	sort.Slice(exact, func(i, j int) bool {
+		return len(exact[i].PathPrefix) > len(exact[j].PathPrefix)
+	})
+	sort.Slice(wildcards, func(i, j int) bool {
+		return len(wildcards[i].PathPrefix) > len(wildcards[j].PathPrefix)
+	})
+
+	r.routes = exact
+	r.wildcards = wildcards
+
+	// Build redirect map from all routes
 	r.redirects = make(map[string]*compose.Route)
 	for i := range r.routes {
 		route := &r.routes[i]
@@ -45,9 +59,16 @@ func (r *Router) Update(routes []compose.Route) {
 			r.redirects[domain] = route
 		}
 	}
+	for i := range r.wildcards {
+		route := &r.wildcards[i]
+		for _, domain := range route.RedirectFrom {
+			r.redirects[domain] = route
+		}
+	}
 }
 
 // Match finds the route for a request using longest prefix matching
+// Priority: exact host match > wildcard host match
 // Returns nil if no route matches
 func (r *Router) Match(host, path string) *compose.Route {
 	r.mu.RLock()
@@ -63,16 +84,31 @@ func (r *Router) Match(host, path string) *compose.Route {
 		path = "/"
 	}
 
+	// Try exact host match first
 	for i := range r.routes {
 		route := &r.routes[i]
 		if route.Host != host {
 			continue
 		}
-		// Check path prefix match with proper boundary checking
 		if matchesPathPrefix(path, route.PathPrefix) {
 			return route
 		}
 	}
+
+	// Try wildcard match (*.example.com)
+	if idx := strings.Index(host, "."); idx != -1 {
+		wildcardHost := "*" + host[idx:] // "acme.tenant.com" → "*.tenant.com"
+		for i := range r.wildcards {
+			route := &r.wildcards[i]
+			if route.Host != wildcardHost {
+				continue
+			}
+			if matchesPathPrefix(path, route.PathPrefix) {
+				return route
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -109,12 +145,19 @@ func (r *Router) Redirect(host string) *compose.Route {
 }
 
 // Hosts returns all unique hosts that should be served (for TLS certificates)
+// Wildcard hosts are returned as-is (e.g., "*.tenant.com")
 func (r *Router) Hosts() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	hostSet := make(map[string]struct{})
 	for _, route := range r.routes {
+		hostSet[route.Host] = struct{}{}
+		for _, redirect := range route.RedirectFrom {
+			hostSet[redirect] = struct{}{}
+		}
+	}
+	for _, route := range r.wildcards {
 		hostSet[route.Host] = struct{}{}
 		for _, redirect := range route.RedirectFrom {
 			hostSet[redirect] = struct{}{}
@@ -134,7 +177,8 @@ func (r *Router) Routes() []compose.Route {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	routes := make([]compose.Route, len(r.routes))
-	copy(routes, r.routes)
+	routes := make([]compose.Route, 0, len(r.routes)+len(r.wildcards))
+	routes = append(routes, r.routes...)
+	routes = append(routes, r.wildcards...)
 	return routes
 }

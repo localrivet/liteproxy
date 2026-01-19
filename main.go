@@ -37,7 +37,7 @@ func loadConfig() Config {
 		HTTPSPort:    getEnvInt("LITEPROXY_HTTPS_PORT", 443),
 		ACMEEmail:    os.Getenv("LITEPROXY_ACME_EMAIL"),
 		ACMEDir:      getEnv("LITEPROXY_ACME_DIR", "./certs"),
-		HTTPSEnabled: getEnvBool("LITEPROXY_HTTPS_ENABLED", true),
+		HTTPSEnabled: getEnvBool("LITEPROXY_HTTPS_ENABLED", false),
 		Watch:        getEnvBool("LITEPROXY_WATCH", false),
 	}
 
