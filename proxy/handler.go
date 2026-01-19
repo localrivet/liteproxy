@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -12,6 +13,51 @@ import (
 
 	"github.com/localrivet/liteproxy/compose"
 	"github.com/localrivet/liteproxy/router"
+)
+
+// bufferPool implements httputil.BufferPool for efficient memory reuse
+// This is the same pattern Traefik uses to reduce GC pressure
+type bufferPool struct {
+	pool sync.Pool
+}
+
+const bufferSize = 32 * 1024 // 32KB, same as Traefik
+
+func newBufferPool() *bufferPool {
+	return &bufferPool{
+		pool: sync.Pool{
+			New: func() any {
+				return make([]byte, bufferSize)
+			},
+		},
+	}
+}
+
+func (b *bufferPool) Get() []byte {
+	return b.pool.Get().([]byte)
+}
+
+func (b *bufferPool) Put(buf []byte) {
+	b.pool.Put(buf)
+}
+
+// Shared resources for all proxies
+var (
+	sharedBufferPool = newBufferPool()
+	sharedTransport  = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	}
 )
 
 // Handler serves as the main HTTP handler for proxying requests
@@ -129,7 +175,9 @@ func (h *Handler) buildProxy(target *url.URL, passHostHeader bool) *httputil.Rev
 			pr.SetXForwarded()
 		},
 
+		Transport:     sharedTransport,
 		FlushInterval: 100 * time.Millisecond,
+		BufferPool:    sharedBufferPool,
 
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy error to %s: %v", target.Host, err)
