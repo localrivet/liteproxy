@@ -362,3 +362,93 @@ func TestHandlerNew(t *testing.T) {
 		t.Error("handler.proxies is nil")
 	}
 }
+
+func TestNormalizeWebSocketHeaders(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"key", "Sec-Websocket-Key", "Sec-WebSocket-Key"},
+		{"version", "Sec-Websocket-Version", "Sec-WebSocket-Version"},
+		{"protocol", "Sec-Websocket-Protocol", "Sec-WebSocket-Protocol"},
+		{"extensions", "Sec-Websocket-Extensions", "Sec-WebSocket-Extensions"},
+		{"accept", "Sec-Websocket-Accept", "Sec-WebSocket-Accept"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := http.Header{}
+			// Set directly to simulate canonicalized header from incoming request
+			h[tt.input] = []string{"test-value"}
+
+			normalizeWebSocketHeaders(h)
+
+			// Check map directly (h.Get would re-canonicalize)
+			if values, exists := h[tt.expected]; !exists || values[0] != "test-value" {
+				t.Errorf("header %q not normalized to %q, got map: %v", tt.input, tt.expected, h)
+			}
+			// Original should be removed
+			if _, exists := h[tt.input]; exists {
+				t.Errorf("original header %q should be removed", tt.input)
+			}
+		})
+	}
+}
+
+func TestWebSocketHeadersForwarded(t *testing.T) {
+	// Track what headers the backend receives
+	var receivedHeaders http.Header
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedHeaders = r.Header.Clone()
+		// Return 200 instead of 101 since httptest can't do WebSocket upgrade
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	backendURL, _ := url.Parse(backend.URL)
+
+	routes := []compose.Route{
+		{Host: "example.com", PathPrefix: "/ws", ServiceName: "ws", ServicePort: 8080, StripPrefix: true},
+	}
+	rtr := router.New(routes)
+
+	h := &Handler{
+		router:  rtr,
+		scheme:  "http",
+		proxies: make(map[string]*httputil.ReverseProxy),
+	}
+
+	h.proxies["ws:8080"] = &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.SetURL(backendURL)
+			normalizeWebSocketHeaders(pr.Out.Header)
+			pr.SetXForwarded()
+		},
+		Transport:     sharedTransport,
+		FlushInterval: 100 * time.Millisecond,
+		BufferPool:    sharedBufferPool,
+	}
+
+	req := httptest.NewRequest("GET", "http://example.com/ws", nil)
+	req.Host = "example.com"
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Connection", "Upgrade")
+	req.Header["Sec-Websocket-Key"] = []string{"dGhlIHNhbXBsZSBub25jZQ=="}
+	req.Header["Sec-Websocket-Version"] = []string{"13"}
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	// Verify WebSocket headers were forwarded (and normalized)
+	if receivedHeaders.Get("Upgrade") != "websocket" {
+		t.Error("Upgrade header not forwarded")
+	}
+	// Check normalized header exists (may be under either key due to Go's handling)
+	if _, ok := receivedHeaders["Sec-WebSocket-Key"]; !ok {
+		if _, ok := receivedHeaders["Sec-Websocket-Key"]; !ok {
+			t.Error("Sec-WebSocket-Key header not forwarded")
+		}
+	}
+}

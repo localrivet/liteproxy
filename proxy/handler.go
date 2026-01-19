@@ -16,7 +16,6 @@ import (
 )
 
 // bufferPool implements httputil.BufferPool for efficient memory reuse
-// This is the same pattern Traefik uses to reduce GC pressure
 type bufferPool struct {
 	pool sync.Pool
 }
@@ -162,7 +161,7 @@ func (h *Handler) getProxy(route *compose.Route) *httputil.ReverseProxy {
 	return proxy
 }
 
-// buildProxy creates a reverse proxy following Traefik-style patterns
+// buildProxy creates a high-performance reverse proxy
 func (h *Handler) buildProxy(target *url.URL, passHostHeader bool) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -171,6 +170,9 @@ func (h *Handler) buildProxy(target *url.URL, passHostHeader bool) *httputil.Rev
 			if passHostHeader {
 				pr.Out.Host = pr.In.Host
 			}
+
+			// Normalize WebSocket headers for strict servers
+			normalizeWebSocketHeaders(pr.Out.Header)
 
 			pr.SetXForwarded()
 		},
@@ -184,5 +186,27 @@ func (h *Handler) buildProxy(target *url.URL, passHostHeader bool) *httputil.Rev
 			w.WriteHeader(http.StatusBadGateway)
 			fmt.Fprintf(w, "Bad Gateway: %v", err)
 		},
+	}
+}
+
+// normalizeWebSocketHeaders ensures WebSocket headers have correct casing
+// Some strict WebSocket servers require exact header names
+func normalizeWebSocketHeaders(h http.Header) {
+	// Standard WebSocket headers that need normalization
+	wsHeaders := []string{
+		"Sec-Websocket-Key",
+		"Sec-Websocket-Version",
+		"Sec-Websocket-Protocol",
+		"Sec-Websocket-Extensions",
+		"Sec-Websocket-Accept",
+	}
+
+	for _, name := range wsHeaders {
+		if values, ok := h[name]; ok {
+			delete(h, name)
+			// Use canonical form: Sec-WebSocket-*
+			canonical := strings.Replace(name, "Websocket", "WebSocket", 1)
+			h[canonical] = values
+		}
 	}
 }
