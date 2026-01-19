@@ -6,7 +6,9 @@ A lightweight reverse proxy that reads Docker Compose files and routes traffic b
 
 - **Zero config files** — all routing defined via compose labels
 - **Longest-prefix matching** — multiple services can share a host with different paths
-- **Automatic HTTPS** — Let's Encrypt certificates via autocert
+- **Wildcard subdomains** — `*.tenant.com` for multi-tenant SaaS routing
+- **Automatic HTTPS** — Let's Encrypt certificates via autocert (optional)
+- **Load balancer friendly** — HTTP-only mode for running behind LB/CDN
 - **Hot reload** — SIGHUP or file watching to reload routes without restart
 - **Single binary** — easy to deploy
 
@@ -60,7 +62,7 @@ Add these labels to any service you want to proxy:
 
 | Label | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `liteproxy.host` | yes | — | Domain to match |
+| `liteproxy.host` | yes | — | Domain to match (supports `*.example.com` wildcards) |
 | `liteproxy.port` | yes | — | Container port to proxy to |
 | `liteproxy.path` | no | `/` | Path prefix (longest match wins) |
 | `liteproxy.strip_prefix` | no | `true` | Strip path prefix before forwarding |
@@ -81,6 +83,7 @@ services:
       - ./certs:/certs
     environment:
       LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      LITEPROXY_HTTPS_ENABLED: "true"
       LITEPROXY_ACME_EMAIL: you@example.com
       LITEPROXY_WATCH: "true"
 
@@ -141,6 +144,35 @@ labels:
 www.example.com/pricing?plan=pro → 301 → example.com/pricing?plan=pro
 ```
 
+## Wildcard Subdomain Routing
+
+For multi-tenant SaaS apps, use wildcard hosts (`*.tenant.com`):
+
+```yaml
+services:
+  marketing:
+    image: marketing:latest
+    labels:
+      liteproxy.host: "tenant.com"
+      liteproxy.port: "80"
+      liteproxy.redirect_from: "www.tenant.com"
+
+  tenant-app:
+    image: tenant-app:latest
+    labels:
+      liteproxy.host: "*.tenant.com"
+      liteproxy.port: "8080"
+```
+
+**Routing priority:**
+1. Redirects are checked first (`www.tenant.com` → 301 to `tenant.com`)
+2. Exact host matches (`tenant.com` → marketing)
+3. Wildcard matches (`acme.tenant.com` → tenant-app)
+
+**Note:** Wildcards match one subdomain level only:
+- ✅ `acme.tenant.com` matches `*.tenant.com`
+- ❌ `sub.acme.tenant.com` does NOT match `*.tenant.com`
+
 ## Configuration
 
 Liteproxy is configured via environment variables:
@@ -150,10 +182,35 @@ Liteproxy is configured via environment variables:
 | `LITEPROXY_COMPOSE_FILE` | `./compose.yaml` | Path to compose file |
 | `LITEPROXY_HTTP_PORT` | `80` | HTTP listen port |
 | `LITEPROXY_HTTPS_PORT` | `443` | HTTPS listen port |
-| `LITEPROXY_ACME_EMAIL` | (required for HTTPS) | Let's Encrypt email |
+| `LITEPROXY_HTTPS_ENABLED` | `false` | Enable HTTPS with autocert |
+| `LITEPROXY_ACME_EMAIL` | — | Let's Encrypt email (required if HTTPS enabled) |
 | `LITEPROXY_ACME_DIR` | `./certs` | Certificate storage directory |
-| `LITEPROXY_HTTPS_ENABLED` | `true` | Enable HTTPS |
 | `LITEPROXY_WATCH` | `false` | Auto-reload on compose file changes |
+
+## Running Behind a Load Balancer
+
+When running behind a load balancer that handles TLS termination, use HTTP-only mode (the default):
+
+```yaml
+services:
+  liteproxy:
+    image: liteproxy:latest
+    ports:
+      - "80:80"
+    volumes:
+      - ./compose.yaml:/etc/liteproxy/compose.yaml:ro
+    environment:
+      LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      # LITEPROXY_HTTPS_ENABLED defaults to false
+```
+
+For direct internet exposure with automatic certificates:
+
+```yaml
+environment:
+  LITEPROXY_HTTPS_ENABLED: "true"
+  LITEPROXY_ACME_EMAIL: you@example.com
+```
 
 ## Reloading Configuration
 
