@@ -1,20 +1,21 @@
 package main
 
 import (
-	"context"
+	"crypto/tls"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/localrivet/liteproxy/compose"
+	"github.com/localrivet/liteproxy/passthrough"
 	"github.com/localrivet/liteproxy/proxy"
 	"github.com/localrivet/liteproxy/router"
-	"github.com/localrivet/liteproxy/tls"
+	liteTLS "github.com/localrivet/liteproxy/tls"
 	"github.com/localrivet/liteproxy/watcher"
 	"golang.org/x/crypto/acme/autocert"
 )
@@ -90,7 +91,11 @@ func main() {
 	}
 	log.Printf("loaded %d routes", len(routes))
 	for _, r := range routes {
-		log.Printf("  %s%s -> %s:%d", r.Host, r.PathPrefix, r.ServiceName, r.ServicePort)
+		extra := ""
+		if r.Passthrough {
+			extra = " [passthrough]"
+		}
+		log.Printf("  %s%s -> %s:%d%s", r.Host, r.PathPrefix, r.ServiceName, r.ServicePort, extra)
 		if len(r.RedirectFrom) > 0 {
 			log.Printf("    redirects from: %v", r.RedirectFrom)
 		}
@@ -108,12 +113,18 @@ func main() {
 	// Create proxy handler
 	handler := proxy.New(rtr, scheme)
 
+	// Check if we have passthrough routes
+	hasPassthrough := rtr.HasPassthroughRoutes()
+	if hasPassthrough {
+		log.Println("passthrough routes detected - using TCP routing")
+	}
+
 	// State for hot reload
 	var (
-		mu          sync.Mutex
-		certManager *autocert.Manager
-		httpServer  *http.Server
-		httpsServer *http.Server
+		mu             sync.Mutex
+		certManager    *autocert.Manager
+		httpListener   *passthrough.Listener
+		httpsListener  *passthrough.Listener
 	)
 
 	// Reload function
@@ -132,18 +143,27 @@ func main() {
 		newRouter := router.New(newRoutes)
 		handler.UpdateRouter(newRouter)
 
+		// Update passthrough listeners
+		if httpListener != nil {
+			httpListener.UpdateRouter(newRouter)
+		}
+		if httpsListener != nil {
+			httpsListener.UpdateRouter(newRouter)
+		}
+
 		log.Printf("reloaded %d routes", len(newRoutes))
 		for _, r := range newRoutes {
-			log.Printf("  %s%s -> %s:%d", r.Host, r.PathPrefix, r.ServiceName, r.ServicePort)
+			extra := ""
+			if r.Passthrough {
+				extra = " [passthrough]"
+			}
+			log.Printf("  %s%s -> %s:%d%s", r.Host, r.PathPrefix, r.ServiceName, r.ServicePort, extra)
 		}
 
 		// Update TLS hosts if HTTPS is enabled
 		if cfg.HTTPSEnabled && certManager != nil {
 			hosts := newRouter.Hosts()
-			certManager = tls.UpdateHosts(certManager, hosts)
-			if httpsServer != nil {
-				httpsServer.TLSConfig = tls.TLSConfig(certManager)
-			}
+			certManager = liteTLS.UpdateHosts(certManager, hosts)
 		}
 	}
 
@@ -169,17 +189,6 @@ func main() {
 				reload()
 			case syscall.SIGINT, syscall.SIGTERM:
 				log.Println("shutting down...")
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-
-				mu.Lock()
-				if httpServer != nil {
-					httpServer.Shutdown(ctx)
-				}
-				if httpsServer != nil {
-					httpsServer.Shutdown(ctx)
-				}
-				mu.Unlock()
 				os.Exit(0)
 			}
 		}
@@ -188,50 +197,103 @@ func main() {
 	// Start servers
 	if cfg.HTTPSEnabled {
 		hosts := rtr.Hosts()
-		certManager = tls.Manager(tls.Config{
+		certManager = liteTLS.Manager(liteTLS.Config{
 			Email:    cfg.ACMEEmail,
 			CacheDir: cfg.ACMEDir,
 			Hosts:    hosts,
 		})
+		tlsConfig := liteTLS.TLSConfig(certManager)
 
-		// HTTPS server
-		httpsServer = &http.Server{
-			Addr:      ":" + strconv.Itoa(cfg.HTTPSPort),
-			Handler:   handler,
-			TLSConfig: tls.TLSConfig(certManager),
+		// HTTP handler for ACME challenges + redirect
+		httpHandler := certManager.HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			target := "https://" + r.Host + r.URL.RequestURI()
+			http.Redirect(w, r, target, http.StatusMovedPermanently)
+		}))
+
+		// HTTPS handler with TLS termination
+		httpsHandler := &tlsHandler{handler: handler, tlsConfig: tlsConfig}
+
+		if hasPassthrough {
+			// Use passthrough listeners for both ports
+			httpLn, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.HTTPPort))
+			if err != nil {
+				log.Fatalf("failed to listen on HTTP port: %v", err)
+			}
+			httpsLn, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.HTTPSPort))
+			if err != nil {
+				log.Fatalf("failed to listen on HTTPS port: %v", err)
+			}
+
+			httpListener = passthrough.NewHTTPListener(httpLn, rtr, httpHandler)
+			httpsListener = passthrough.NewTLSListener(httpsLn, rtr, httpsHandler)
+
+			go func() {
+				log.Printf("starting HTTP passthrough on :%d", cfg.HTTPPort)
+				if err := httpListener.Serve(); err != nil {
+					log.Fatalf("HTTP listener error: %v", err)
+				}
+			}()
+
+			log.Printf("starting HTTPS passthrough on :%d", cfg.HTTPSPort)
+			if err := httpsListener.Serve(); err != nil {
+				log.Fatalf("HTTPS listener error: %v", err)
+			}
+		} else {
+			// Standard HTTP servers (no passthrough routes)
+			httpServer := &http.Server{
+				Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
+				Handler: httpHandler,
+			}
+			httpsServer := &http.Server{
+				Addr:      ":" + strconv.Itoa(cfg.HTTPSPort),
+				Handler:   handler,
+				TLSConfig: tlsConfig,
+			}
+
+			go func() {
+				log.Printf("starting HTTP server on :%d (ACME + redirect)", cfg.HTTPPort)
+				if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
+					log.Fatalf("HTTP server error: %v", err)
+				}
+			}()
+
+			log.Printf("starting HTTPS server on :%d", cfg.HTTPSPort)
+			if err := httpsServer.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
+				log.Fatalf("HTTPS server error: %v", err)
+			}
 		}
+	} else {
+		// HTTP only mode
+		if hasPassthrough {
+			httpLn, err := net.Listen("tcp", ":"+strconv.Itoa(cfg.HTTPPort))
+			if err != nil {
+				log.Fatalf("failed to listen on HTTP port: %v", err)
+			}
 
-		// HTTP server for ACME challenges + redirect to HTTPS
-		httpServer = &http.Server{
-			Addr: ":" + strconv.Itoa(cfg.HTTPPort),
-			Handler: certManager.HTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Redirect HTTP to HTTPS
-				target := "https://" + r.Host + r.URL.RequestURI()
-				http.Redirect(w, r, target, http.StatusMovedPermanently)
-			})),
-		}
-
-		go func() {
-			log.Printf("starting HTTP server on :%d (ACME challenges + HTTPS redirect)", cfg.HTTPPort)
+			httpListener = passthrough.NewHTTPListener(httpLn, rtr, handler)
+			log.Printf("starting HTTP passthrough on :%d", cfg.HTTPPort)
+			if err := httpListener.Serve(); err != nil {
+				log.Fatalf("HTTP listener error: %v", err)
+			}
+		} else {
+			httpServer := &http.Server{
+				Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
+				Handler: handler,
+			}
+			log.Printf("starting HTTP server on :%d", cfg.HTTPPort)
 			if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
 				log.Fatalf("HTTP server error: %v", err)
 			}
-		}()
-
-		log.Printf("starting HTTPS server on :%d", cfg.HTTPSPort)
-		if err := httpsServer.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
-			log.Fatalf("HTTPS server error: %v", err)
-		}
-	} else {
-		// HTTP only
-		httpServer = &http.Server{
-			Addr:    ":" + strconv.Itoa(cfg.HTTPPort),
-			Handler: handler,
-		}
-
-		log.Printf("starting HTTP server on :%d", cfg.HTTPPort)
-		if err := httpServer.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("HTTP server error: %v", err)
 		}
 	}
+}
+
+// tlsHandler wraps an http.Handler with TLS termination
+type tlsHandler struct {
+	handler   http.Handler
+	tlsConfig *tls.Config
+}
+
+func (h *tlsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.handler.ServeHTTP(w, r)
 }

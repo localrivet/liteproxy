@@ -12,12 +12,13 @@ import (
 )
 
 const (
-	LabelHost         = "liteproxy.host"
-	LabelPort         = "liteproxy.port"
-	LabelPath         = "liteproxy.path"
+	LabelHost        = "liteproxy.host"
+	LabelPort        = "liteproxy.port"
+	LabelPath        = "liteproxy.path"
 	LabelRedirectFrom = "liteproxy.redirect_from"
-	LabelPassHost     = "liteproxy.passhost"
-	LabelStripPrefix  = "liteproxy.strip_prefix"
+	LabelPassHost    = "liteproxy.passhost"
+	LabelStripPrefix = "liteproxy.strip_prefix"
+	LabelPassthrough = "liteproxy.passthrough"
 )
 
 // Route represents a single routing rule extracted from compose labels
@@ -29,6 +30,7 @@ type Route struct {
 	PassHostHeader bool
 	StripPrefix    bool
 	RedirectFrom   []string
+	Passthrough    bool // Forward raw TCP without terminating TLS or processing HTTP
 }
 
 // ParseFile reads a compose file and extracts routes from labeled services
@@ -128,6 +130,11 @@ func extractRoute(service types.ServiceConfig) (*Route, error) {
 			domains[i] = strings.TrimSpace(d)
 		}
 		route.RedirectFrom = domains
+	}
+
+	// Optional: passthrough (forward raw TCP to backend)
+	if passthrough := labels[LabelPassthrough]; passthrough != "" {
+		route.Passthrough = passthrough == "true"
 	}
 
 	return route, nil

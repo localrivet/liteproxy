@@ -7,6 +7,7 @@ A lightweight reverse proxy that reads Docker Compose files and routes traffic b
 - **Zero config files** — all routing defined via compose labels
 - **Longest-prefix matching** — multiple services can share a host with different paths
 - **Wildcard subdomains** — `*.tenant.com` for multi-tenant SaaS routing
+- **TCP passthrough** — forward raw TCP for services that handle their own TLS
 - **Automatic HTTPS** — Let's Encrypt certificates via autocert (optional)
 - **Load balancer friendly** — HTTP-only mode for running behind LB/CDN
 - **Hot reload** — SIGHUP or file watching to reload routes without restart
@@ -68,6 +69,7 @@ Add these labels to any service you want to proxy:
 | `liteproxy.strip_prefix` | no | `true` | Strip path prefix before forwarding |
 | `liteproxy.redirect_from` | no | — | Comma-separated domains to 301 redirect |
 | `liteproxy.passhost` | no | `false` | Pass original Host header to upstream |
+| `liteproxy.passthrough` | no | `false` | Forward raw TCP without TLS termination |
 
 ## Example Compose File
 
@@ -172,6 +174,47 @@ services:
 **Note:** Wildcards match one subdomain level only:
 - ✅ `acme.tenant.com` matches `*.tenant.com`
 - ❌ `sub.acme.tenant.com` does NOT match `*.tenant.com`
+
+## TCP Passthrough
+
+For services that need to handle their own TLS (mail servers, custom protocols), use passthrough mode:
+
+```yaml
+services:
+  liteproxy:
+    image: liteproxy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+
+  # Normal reverse proxy - liteproxy terminates TLS
+  webapp:
+    image: webapp:latest
+    labels:
+      liteproxy.host: "app.example.com"
+      liteproxy.port: "8080"
+
+  # Passthrough - mail server handles its own TLS
+  mailserver:
+    image: mailserver:latest
+    labels:
+      liteproxy.host: "mail.example.com"
+      liteproxy.port: "443"
+      liteproxy.passthrough: "true"
+```
+
+**How passthrough works:**
+1. Liteproxy peeks at the TLS ClientHello (SNI) or HTTP Host header
+2. If the host matches a passthrough route, raw TCP is forwarded to the backend
+3. The backend handles TLS termination and all protocol details
+
+**Use cases:**
+- Mail servers (Postfix, Dovecot) that need their own certificates
+- Services with mutual TLS (mTLS) requirements
+- Custom protocols over TLS
+- Services that must see the original client certificate
+
+**Performance:** Passthrough adds ~10-30 microseconds latency. Data transfer is network-bound, not CPU-bound.
 
 ## Configuration
 

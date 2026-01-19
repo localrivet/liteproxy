@@ -182,3 +182,53 @@ func (r *Router) Routes() []compose.Route {
 	routes = append(routes, r.wildcards...)
 	return routes
 }
+
+// GetPassthrough returns the passthrough route for a host, or nil if not passthrough
+func (r *Router) GetPassthrough(host string) *compose.Route {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Strip port from host if present
+	if idx := strings.LastIndex(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+
+	// Check exact matches first
+	for i := range r.routes {
+		route := &r.routes[i]
+		if route.Host == host && route.Passthrough {
+			return route
+		}
+	}
+
+	// Check wildcard matches
+	if idx := strings.Index(host, "."); idx != -1 {
+		wildcardHost := "*" + host[idx:]
+		for i := range r.wildcards {
+			route := &r.wildcards[i]
+			if route.Host == wildcardHost && route.Passthrough {
+				return route
+			}
+		}
+	}
+
+	return nil
+}
+
+// HasPassthroughRoutes returns true if any routes have TLS passthrough enabled
+func (r *Router) HasPassthroughRoutes() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for i := range r.routes {
+		if r.routes[i].Passthrough {
+			return true
+		}
+	}
+	for i := range r.wildcards {
+		if r.wildcards[i].Passthrough {
+			return true
+		}
+	}
+	return false
+}
