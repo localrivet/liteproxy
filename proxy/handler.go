@@ -43,7 +43,7 @@ func (b *bufferPool) Put(buf []byte) {
 // Shared resources for all proxies
 var (
 	sharedBufferPool = newBufferPool()
-	sharedTransport  = &http.Transport{
+	sharedTransport = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -51,11 +51,10 @@ var (
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
+		MaxIdleConnsPerHost:   100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ResponseHeaderTimeout: 60 * time.Second,
 	}
 )
 
@@ -111,21 +110,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy := h.getProxy(route)
 
 	// Strip the path prefix before proxying (if enabled)
-	// e.g., /api/users with prefix /api becomes /users
 	if route.StripPrefix && route.PathPrefix != "/" {
-		originalPath := r.URL.Path
 		r.URL.Path = strings.TrimPrefix(r.URL.Path, route.PathPrefix)
 		if r.URL.Path == "" {
 			r.URL.Path = "/"
 		}
-		// Also update RawPath if set
-		if r.URL.RawPath != "" {
-			r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, route.PathPrefix)
-			if r.URL.RawPath == "" {
-				r.URL.RawPath = "/"
-			}
-		}
-		log.Printf("proxy: %s%s -> %s:%d%s", host, originalPath, route.ServiceName, route.ServicePort, r.URL.Path)
 	}
 
 	proxy.ServeHTTP(w, r)
