@@ -105,7 +105,7 @@ func extractRoute(service types.ServiceConfig) (*Route, error) {
 		ServiceName: service.Name,
 		ServicePort: port,
 		PathPrefix:  "/",
-		StripPrefix: true, // default to stripping
+		StripPrefix: false, // default to preserving path
 	}
 
 	// Optional: path prefix
@@ -118,9 +118,9 @@ func extractRoute(service types.ServiceConfig) (*Route, error) {
 		route.PassHostHeader = passhost == "true"
 	}
 
-	// Optional: strip_prefix (defaults to true)
+	// Optional: strip_prefix (defaults to false)
 	if stripPrefix := labels[LabelStripPrefix]; stripPrefix != "" {
-		route.StripPrefix = stripPrefix != "false"
+		route.StripPrefix = stripPrefix == "true"
 	}
 
 	// Optional: redirect_from (comma-separated)

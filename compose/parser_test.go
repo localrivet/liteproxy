@@ -194,8 +194,8 @@ services:
 	if r.PassHostHeader {
 		t.Error("PassHostHeader default = true, want false")
 	}
-	if !r.StripPrefix {
-		t.Error("StripPrefix default = false, want true")
+	if r.StripPrefix {
+		t.Error("StripPrefix default = true, want false")
 	}
 	if len(r.RedirectFrom) != 0 {
 		t.Errorf("RedirectFrom default has %d items, want 0", len(r.RedirectFrom))
