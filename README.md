@@ -241,6 +241,182 @@ Liteproxy is configured via environment variables:
 | `LITEPROXY_ACME_DIR` | `./certs` | Certificate storage directory |
 | `LITEPROXY_WATCH` | `false` | Auto-reload on compose file changes |
 
+## Multi-Project Networking
+
+When running multiple projects (each with their own compose file), liteproxy needs to connect to each project's network while keeping projects isolated from each other.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        Liteproxy                             │
+│              Connected to ALL project networks               │
+└─────────────────────────────────────────────────────────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
+│  project_a_net  │  │  project_b_net  │  │  project_c_net  │
+│   (isolated)    │  │   (isolated)    │  │   (isolated)    │
+│                 │  │                 │  │                 │
+│  ┌───────────┐  │  │  ┌───────────┐  │  │  ┌───────────┐  │
+│  │  webapp   │  │  │  │    api    │  │  │  │   blog    │  │
+│  │  db       │  │  │  │  redis    │  │  │  │  mysql    │  │
+│  └───────────┘  │  │  └───────────┘  │  │  └───────────┘  │
+└─────────────────┘  └─────────────────┘  └─────────────────┘
+```
+
+Each project is isolated — `project_a` cannot reach `project_b`'s services. Only liteproxy bridges them.
+
+### Setup Instructions
+
+**Step 1: Create a shared network for liteproxy**
+
+```bash
+docker network create liteproxy-net
+```
+
+**Step 2: Configure liteproxy to use external networks**
+
+Create `liteproxy-compose.yaml`:
+
+```yaml
+services:
+  liteproxy:
+    image: liteproxy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./routes.yaml:/etc/liteproxy/compose.yaml:ro
+      - ./certs:/certs
+    environment:
+      LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      LITEPROXY_HTTPS_ENABLED: "true"
+      LITEPROXY_ACME_EMAIL: you@example.com
+      LITEPROXY_WATCH: "true"
+    networks:
+      - liteproxy-net
+      - projecta-net
+      - projectb-net
+
+networks:
+  liteproxy-net:
+    external: true
+  projecta-net:
+    external: true
+  projectb-net:
+    external: true
+```
+
+**Step 3: Configure each project with its own network**
+
+Project A (`project-a/compose.yaml`):
+
+```yaml
+services:
+  webapp:
+    image: webapp:latest
+    networks:
+      - projecta-net
+
+  db:
+    image: postgres:alpine
+    networks:
+      - projecta-net
+
+networks:
+  projecta-net:
+    name: projecta-net  # Explicit name prevents prefixing
+```
+
+Project B (`project-b/compose.yaml`):
+
+```yaml
+services:
+  api:
+    image: api:latest
+    networks:
+      - projectb-net
+
+  redis:
+    image: redis:alpine
+    networks:
+      - projectb-net
+
+networks:
+  projectb-net:
+    name: projectb-net  # Explicit name prevents prefixing
+```
+
+**Step 4: Create a routes file for liteproxy**
+
+`routes.yaml` (this is what liteproxy reads for routing):
+
+```yaml
+services:
+  # Project A routes
+  webapp:
+    labels:
+      liteproxy.host: "projecta.com"
+      liteproxy.port: "8080"
+      liteproxy.redirect_from: "www.projecta.com"
+
+  # Project B routes
+  api:
+    labels:
+      liteproxy.host: "projectb.com"
+      liteproxy.port: "3000"
+      liteproxy.passthrough: "true"
+      liteproxy.port.http: "80"
+```
+
+**Step 5: Start everything in order**
+
+```bash
+# 1. Create networks first
+docker network create liteproxy-net
+docker network create projecta-net
+docker network create projectb-net
+
+# 2. Start backend projects
+cd project-a && docker compose up -d
+cd project-b && docker compose up -d
+
+# 3. Start liteproxy last
+cd liteproxy && docker compose -f liteproxy-compose.yaml up -d
+```
+
+### Adding a New Project
+
+When adding a new project:
+
+1. Create the network: `docker network create newproject-net`
+2. Add the network to liteproxy's compose file (networks section)
+3. Add routes to `routes.yaml`
+4. Start the new project: `cd new-project && docker compose up -d`
+5. Restart liteproxy to pick up new network: `docker compose -f liteproxy-compose.yaml up -d`
+
+Or with hot reload (if `LITEPROXY_WATCH=true`):
+- Edit `routes.yaml` — routes update automatically
+- But network changes still require restarting liteproxy
+
+### AI Setup Instructions
+
+When configuring liteproxy for a new server or project, follow this exact pattern:
+
+1. **Network naming**: Use explicit `name:` in networks to prevent Docker from prefixing with project name
+2. **External networks**: All networks in liteproxy's compose must be `external: true`
+3. **Routes file**: Keep routes in a separate file from liteproxy's compose (e.g., `routes.yaml`)
+4. **Service names in routes**: Must match the actual service names in each project's compose file
+5. **Never use default networks**: Always define explicit networks for isolation
+6. **Order matters**: Create networks → Start backends → Start liteproxy
+
+Common mistakes to avoid:
+- ❌ Using `default` network (no isolation)
+- ❌ Omitting `name:` on networks (causes prefixing like `projecta_projecta-net`)
+- ❌ Starting liteproxy before creating all networks
+- ❌ Putting route labels in liteproxy's own compose instead of routes file
+
 ## Running Behind a Load Balancer
 
 When running behind a load balancer that handles TLS termination, use HTTP-only mode (the default):
