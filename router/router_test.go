@@ -573,3 +573,72 @@ func TestHostsIncludesWildcards(t *testing.T) {
 		}
 	}
 }
+
+// Benchmarks
+
+func BenchmarkMatch(b *testing.B) {
+	routes := []compose.Route{
+		{Host: "example.com", PathPrefix: "/", ServiceName: "web", ServicePort: 80},
+		{Host: "example.com", PathPrefix: "/api", ServiceName: "api", ServicePort: 8080},
+		{Host: "example.com", PathPrefix: "/api/v2", ServiceName: "api-v2", ServicePort: 8081},
+		{Host: "other.com", PathPrefix: "/", ServiceName: "other", ServicePort: 80},
+		{Host: "app1.com", PathPrefix: "/", ServiceName: "app1", ServicePort: 80},
+		{Host: "app2.com", PathPrefix: "/", ServiceName: "app2", ServicePort: 80},
+		{Host: "app3.com", PathPrefix: "/", ServiceName: "app3", ServicePort: 80},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "tenant", ServicePort: 8080},
+	}
+	r := New(routes)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			r.Match("example.com", "/api/users")
+		}
+	})
+}
+
+func BenchmarkMatchWildcard(b *testing.B) {
+	routes := []compose.Route{
+		{Host: "tenant.com", PathPrefix: "/", ServiceName: "marketing", ServicePort: 80},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "tenant-app", ServicePort: 8080},
+	}
+	r := New(routes)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			r.Match("acme.tenant.com", "/dashboard")
+		}
+	})
+}
+
+func BenchmarkRedirect(b *testing.B) {
+	routes := []compose.Route{
+		{Host: "example.com", PathPrefix: "/", ServiceName: "web", ServicePort: 80,
+			RedirectFrom: []string{"www.example.com", "old.example.com"}},
+	}
+	r := New(routes)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			r.Redirect("www.example.com")
+		}
+	})
+}
+
+func BenchmarkGetPassthrough(b *testing.B) {
+	routes := []compose.Route{
+		{Host: "app.example.com", PathPrefix: "/", ServiceName: "app", ServicePort: 8080, Passthrough: false},
+		{Host: "mail.example.com", PathPrefix: "/", ServiceName: "mail", ServicePort: 443, Passthrough: true},
+		{Host: "*.tenant.com", PathPrefix: "/", ServiceName: "tenant", ServicePort: 443, Passthrough: true},
+	}
+	r := New(routes)
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			r.GetPassthrough("mail.example.com")
+		}
+	})
+}

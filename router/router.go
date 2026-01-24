@@ -185,6 +185,24 @@ func (r *Router) Routes() []compose.Route {
 
 // GetPassthrough returns the passthrough route for a host, or nil if not passthrough
 func (r *Router) GetPassthrough(host string) *compose.Route {
+	return r.getPassthroughRoute(host)
+}
+
+// GetPassthroughPort returns the appropriate port for passthrough based on protocol
+// For HTTP, returns HTTPPort if set, otherwise ServicePort
+// For HTTPS (forHTTP=false), always returns ServicePort
+func (r *Router) GetPassthroughPort(host string, forHTTP bool) (route *compose.Route, port int) {
+	route = r.getPassthroughRoute(host)
+	if route == nil {
+		return nil, 0
+	}
+	if forHTTP && route.HTTPPort > 0 {
+		return route, route.HTTPPort
+	}
+	return route, route.ServicePort
+}
+
+func (r *Router) getPassthroughRoute(host string) *compose.Route {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 

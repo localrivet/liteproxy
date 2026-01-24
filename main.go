@@ -225,7 +225,7 @@ func main() {
 			}
 
 			httpListener = passthrough.NewHTTPListener(httpLn, rtr, httpHandler)
-			httpsListener = passthrough.NewTLSListener(httpsLn, rtr, httpsHandler)
+			httpsListener = passthrough.NewTLSListener(httpsLn, rtr, httpsHandler, tlsConfig)
 
 			go func() {
 				log.Printf("starting HTTP passthrough on :%d", cfg.HTTPPort)

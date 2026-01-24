@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/localrivet/liteproxy/compose"
@@ -60,8 +61,8 @@ var (
 
 // Handler serves as the main HTTP handler for proxying requests
 type Handler struct {
-	router *router.Router
-	scheme string // http or https for redirects
+	router atomic.Pointer[router.Router] // lock-free router access
+	scheme string                        // http or https for redirects
 
 	mu      sync.RWMutex
 	proxies map[string]*httputil.ReverseProxy // cache of proxies by service:port
@@ -69,19 +70,22 @@ type Handler struct {
 
 // New creates a new proxy Handler
 func New(r *router.Router, scheme string) *Handler {
-	return &Handler{
-		router:  r,
+	h := &Handler{
 		scheme:  scheme,
 		proxies: make(map[string]*httputil.ReverseProxy),
 	}
+	h.router.Store(r)
+	return h
 }
 
 // UpdateRouter updates the router (called on config reload)
 func (h *Handler) UpdateRouter(r *router.Router) {
+	h.router.Store(r) // atomic, lock-free
+
+	// Clear proxy cache under lock
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.router = r
-	h.proxies = make(map[string]*httputil.ReverseProxy) // clear proxy cache
+	h.proxies = make(map[string]*httputil.ReverseProxy)
+	h.mu.Unlock()
 }
 
 // ServeHTTP handles incoming requests
@@ -89,8 +93,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	path := r.URL.Path
 
+	// Get router atomically (lock-free)
+	rtr := h.router.Load()
+
 	// Check for redirect first
-	if target := h.router.Redirect(host); target != nil {
+	if target := rtr.Redirect(host); target != nil {
 		redirectURL := fmt.Sprintf("%s://%s%s", h.scheme, target.Host, path)
 		if r.URL.RawQuery != "" {
 			redirectURL += "?" + r.URL.RawQuery
@@ -100,7 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find matching route
-	route := h.router.Match(host, path)
+	route := rtr.Match(host, path)
 	if route == nil {
 		http.Error(w, "no route found", http.StatusNotFound)
 		return

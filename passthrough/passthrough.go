@@ -2,6 +2,7 @@ package passthrough
 
 import (
 	"bufio"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -29,18 +30,19 @@ type Listener struct {
 	router       *router.Router
 	httpHandler  http.Handler
 	httpsHandler http.Handler
-	tlsConfig    any // *tls.Config, stored as any to avoid import cycle
+	tlsConfig    *tls.Config
 	isTLS        bool
 
 	mu sync.RWMutex
 }
 
 // NewTLSListener creates a listener that peeks SNI for passthrough routing
-func NewTLSListener(ln net.Listener, r *router.Router, httpsHandler http.Handler) *Listener {
+func NewTLSListener(ln net.Listener, r *router.Router, httpsHandler http.Handler, tlsConfig *tls.Config) *Listener {
 	return &Listener{
 		Listener:     ln,
 		router:       r,
 		httpsHandler: httpsHandler,
+		tlsConfig:    tlsConfig,
 		isTLS:        true,
 	}
 }
@@ -115,11 +117,12 @@ func (l *Listener) handleTLSConn(conn net.Conn, r *router.Router) {
 		return
 	}
 
-	// Not passthrough: serve via HTTPS handler
-	// Create replay connection with peeked data
+	// Not passthrough: do TLS termination and serve via HTTPS handler
+	// Create replay connection with peeked data, then wrap with TLS
 	wrappedConn := &replayConn{Conn: conn, buf: buf[:n], pool: &peekBufPool, poolBuf: buf}
+	tlsConn := tls.Server(wrappedConn, l.tlsConfig)
 	server := &http.Server{Handler: l.httpsHandler}
-	singleLn := newSingleConnListener(wrappedConn)
+	singleLn := newSingleConnListener(tlsConn)
 	server.Serve(singleLn)
 }
 
@@ -142,11 +145,11 @@ func (l *Listener) handleHTTPConn(conn net.Conn, r *router.Router) {
 		return
 	}
 
-	// Check if this host needs passthrough
-	route := r.GetPassthrough(host)
+	// Check if this host needs passthrough (use HTTP port if configured)
+	route, port := r.GetPassthroughPort(host, true)
 	if route != nil {
-		// Passthrough: forward raw TCP to backend
-		backend := fmt.Sprintf("%s:%d", route.ServiceName, route.ServicePort)
+		// Passthrough: forward raw TCP to backend (using http_port if set)
+		backend := fmt.Sprintf("%s:%d", route.ServiceName, port)
 		proxyTCP(conn, backend, buf[:n])
 		peekBufPool.Put(buf)
 		return

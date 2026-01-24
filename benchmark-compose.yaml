@@ -1,0 +1,39 @@
+# Benchmark setup for liteproxy with minimal resource constraints
+#
+# Run benchmarks:
+#   docker compose -f benchmark-compose.yaml up -d --build
+#   hey -n 100000 -c 100 -host "example.com" http://localhost:50718/
+#   docker compose -f benchmark-compose.yaml down
+#
+# Minimal resources (0.5 CPU, 64MB RAM) to test efficiency under constraints.
+
+services:
+  liteproxy:
+    build: .
+    ports:
+      - "50718:80"
+    volumes:
+      - ./benchmark-compose.yaml:/etc/liteproxy/compose.yaml:ro
+    environment:
+      LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      LITEPROXY_HTTPS_ENABLED: "false"
+      GOMAXPROCS: "1"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 64M
+    depends_on:
+      - backend
+
+  # Simple static backend for benchmarking
+  backend:
+    image: nginx:alpine
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 64M
+    labels:
+      liteproxy.host: "example.com"
+      liteproxy.port: "80"

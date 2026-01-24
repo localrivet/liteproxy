@@ -14,6 +14,7 @@ import (
 const (
 	LabelHost        = "liteproxy.host"
 	LabelPort        = "liteproxy.port"
+	LabelPortHTTP    = "liteproxy.port.http"
 	LabelPath        = "liteproxy.path"
 	LabelRedirectFrom = "liteproxy.redirect_from"
 	LabelPassHost    = "liteproxy.passhost"
@@ -27,6 +28,7 @@ type Route struct {
 	PathPrefix     string
 	ServiceName    string
 	ServicePort    int
+	HTTPPort       int  // Optional: separate port for HTTP passthrough (for ACME challenges)
 	PassHostHeader bool
 	StripPrefix    bool
 	RedirectFrom   []string
@@ -135,6 +137,15 @@ func extractRoute(service types.ServiceConfig) (*Route, error) {
 	// Optional: passthrough (forward raw TCP to backend)
 	if passthrough := labels[LabelPassthrough]; passthrough != "" {
 		route.Passthrough = passthrough == "true"
+	}
+
+	// Optional: http_port for passthrough (separate port for HTTP/ACME challenges)
+	if httpPortStr := labels[LabelPortHTTP]; httpPortStr != "" {
+		httpPort, err := strconv.Atoi(httpPortStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid http_port %q: %w", httpPortStr, err)
+		}
+		route.HTTPPort = httpPort
 	}
 
 	return route, nil

@@ -225,12 +225,7 @@ func TestProxyIntegration(t *testing.T) {
 		},
 	}
 	rtr := router.New(routes)
-
-	h := &Handler{
-		router:  rtr,
-		scheme:  "http",
-		proxies: make(map[string]*httputil.ReverseProxy),
-	}
+	h := New(rtr, "http")
 
 	// Pre-populate the proxy cache with our test backend
 	h.proxies["api:8080"] = &httputil.ReverseProxy{
@@ -284,12 +279,7 @@ func TestProxyIntegrationNoStrip(t *testing.T) {
 		},
 	}
 	rtr := router.New(routes)
-
-	h := &Handler{
-		router:  rtr,
-		scheme:  "http",
-		proxies: make(map[string]*httputil.ReverseProxy),
-	}
+	h := New(rtr, "http")
 
 	h.proxies["api:8080"] = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
@@ -352,7 +342,7 @@ func TestHandlerNew(t *testing.T) {
 	r := router.New(routes)
 	h := New(r, "https")
 
-	if h.router == nil {
+	if h.router.Load() == nil {
 		t.Error("handler.router is nil")
 	}
 	if h.scheme != "https" {
@@ -413,12 +403,7 @@ func TestWebSocketHeadersForwarded(t *testing.T) {
 		{Host: "example.com", PathPrefix: "/ws", ServiceName: "ws", ServicePort: 8080, StripPrefix: true},
 	}
 	rtr := router.New(routes)
-
-	h := &Handler{
-		router:  rtr,
-		scheme:  "http",
-		proxies: make(map[string]*httputil.ReverseProxy),
-	}
+	h := New(rtr, "http")
 
 	h.proxies["ws:8080"] = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {

@@ -5,12 +5,14 @@ A lightweight reverse proxy that reads Docker Compose files and routes traffic b
 ## Features
 
 - **Zero config files** — all routing defined via compose labels
+- **Zero-downtime hot reload** — add/remove services without dropping connections
 - **Longest-prefix matching** — multiple services can share a host with different paths
 - **Wildcard subdomains** — `*.tenant.com` for multi-tenant SaaS routing
 - **TCP passthrough** — forward raw TCP for services that handle their own TLS
+- **Mixed mode** — combine passthrough and proxy routes on the same server
 - **Automatic HTTPS** — Let's Encrypt certificates via autocert (optional)
 - **Load balancer friendly** — HTTP-only mode for running behind LB/CDN
-- **Hot reload** — SIGHUP or file watching to reload routes without restart
+- **High throughput** — lock-free hot path, parallel request handling
 - **Single binary** — easy to deploy
 
 ## Quick Start
@@ -64,7 +66,8 @@ Add these labels to any service you want to proxy:
 | Label | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `liteproxy.host` | yes | — | Domain to match (supports `*.example.com` wildcards) |
-| `liteproxy.port` | yes | — | Container port to proxy to |
+| `liteproxy.port` | yes | — | Backend port to proxy to |
+| `liteproxy.port.http` | no | same as port | HTTP port override for passthrough (ACME challenges) |
 | `liteproxy.path` | no | `/` | Path prefix (longest match wins) |
 | `liteproxy.strip_prefix` | no | `false` | Strip path prefix before forwarding |
 | `liteproxy.redirect_from` | no | — | Comma-separated domains to 301 redirect |
@@ -200,6 +203,7 @@ services:
     labels:
       liteproxy.host: "mail.example.com"
       liteproxy.port: "443"
+      liteproxy.port.http: "80"  # For ACME challenges
       liteproxy.passthrough: "true"
 ```
 
@@ -208,7 +212,14 @@ services:
 2. If the host matches a passthrough route, raw TCP is forwarded to the backend
 3. The backend handles TLS termination and all protocol details
 
+**Port routing for passthrough:**
+- HTTPS (port 443) → forwarded to `liteproxy.port` (e.g., backend:443)
+- HTTP (port 80) → forwarded to `liteproxy.port.http` (e.g., backend:80 for ACME)
+
+If `port.http` is not set, HTTP traffic also goes to `port`.
+
 **Use cases:**
+- Apps with their own autocert that need ACME challenges on port 80
 - Mail servers (Postfix, Dovecot) that need their own certificates
 - Services with mutual TLS (mTLS) requirements
 - Custom protocols over TLS
@@ -255,19 +266,148 @@ environment:
   LITEPROXY_ACME_EMAIL: you@example.com
 ```
 
-## Reloading Configuration
+## Hot Reload (Zero Downtime)
 
-**SIGHUP (always available):**
-```bash
-kill -HUP $(pidof liteproxy)
+Liteproxy supports zero-downtime configuration updates. Add new services, change routes, or remove hosts without restarting or dropping connections.
+
+### Automatic Reload (Recommended for Production)
+
+Enable file watching to automatically reload when `compose.yaml` changes:
+
+```yaml
+environment:
+  LITEPROXY_WATCH: "true"
 ```
 
-**File watching (opt-in):**
+When you edit the compose file:
+1. File watcher detects change (500ms debounce)
+2. New routes are parsed
+3. Router is swapped atomically (lock-free)
+4. Existing connections continue uninterrupted
+5. New requests use updated routes immediately
+
+### Manual Reload
+
+Send SIGHUP to reload configuration:
+
 ```bash
-LITEPROXY_WATCH=true liteproxy
+# Inside Docker
+docker compose exec liteproxy kill -HUP 1
+
+# Or from host
+docker compose kill -s HUP liteproxy
 ```
 
-When enabled, liteproxy automatically reloads when compose.yaml changes (debounced to 500ms).
+### Adding a New Service
+
+```bash
+# 1. Add service to compose.yaml with liteproxy labels
+# 2. Start the new service
+docker compose up -d new-service
+
+# 3. Liteproxy auto-reloads (if LITEPROXY_WATCH=true)
+#    Or send: docker compose kill -s HUP liteproxy
+
+# 4. Verify
+docker compose logs liteproxy | grep "reloaded"
+```
+
+### Performance During Reload
+
+| Operation | Duration | Impact |
+|-----------|----------|--------|
+| Router swap | ~nanoseconds | None (atomic pointer) |
+| Cache clear | ~microseconds | First request to each service slightly slower |
+| Total reload | <1ms | No dropped connections |
+
+The hot path uses lock-free atomic operations and read-only locks that allow unlimited parallel requests.
+
+## Mixed Mode (Passthrough + Proxy)
+
+Liteproxy supports running passthrough and regular proxy routes simultaneously:
+
+```yaml
+services:
+  # Liteproxy terminates TLS, proxies HTTP to backend
+  webapp:
+    labels:
+      liteproxy.host: "app.example.com"
+      liteproxy.port: "8080"
+
+  # Backend handles its own TLS (passthrough)
+  legacy-app:
+    labels:
+      liteproxy.host: "legacy.example.com"
+      liteproxy.port: "443"
+      liteproxy.port.http: "80"
+      liteproxy.passthrough: "true"
+```
+
+For passthrough services with autocert:
+- `liteproxy.port` — HTTPS traffic forwarded here (usually 443)
+- `liteproxy.port.http` — HTTP traffic forwarded here (for ACME challenges, usually 80)
+
+## Performance
+
+Liteproxy is designed for high throughput with minimal overhead.
+
+### Unit Benchmarks
+
+Internal operations measured with `go test -bench`:
+
+| Operation | Time | Allocations | Notes |
+|-----------|------|-------------|-------|
+| Route match | 150 ns | 0 | Hot path, parallel |
+| Wildcard match | 153 ns | 0 | Hot path, parallel |
+| Redirect lookup | 141 ns | 0 | Hot path, parallel |
+| Passthrough check | 144 ns | 0 | Hot path, parallel |
+| SNI extraction | 19 ns | 1 | TLS passthrough |
+| HTTP host extraction | 1.6 µs | 11 | HTTP passthrough |
+
+### HTTP Benchmarks
+
+End-to-end benchmarks using [hey](https://github.com/rakyll/hey) with Docker resource constraints:
+
+**Minimal resources (0.5 CPU, 64MB RAM):**
+```
+Requests/sec:  11,676
+Latency p50:   5.5 ms
+Latency p99:   46 ms
+```
+
+**Standard resources (2 CPU, 256MB RAM):**
+```
+Requests/sec:  28,000
+Latency p50:   1.2 ms
+Latency p99:   7.4 ms
+```
+
+### Running Benchmarks
+
+**Unit benchmarks:**
+```bash
+go test -bench=. -benchmem ./...
+```
+
+**HTTP benchmarks (requires Docker and [hey](https://github.com/rakyll/hey)):**
+```bash
+# Start benchmark environment (0.5 CPU, 64MB per container)
+docker compose -f benchmark-compose.yaml up -d
+
+# Run benchmark: 100k requests, 100 concurrent connections
+hey -n 100000 -c 100 -host "example.com" http://localhost:50718/
+
+# Cleanup
+docker compose -f benchmark-compose.yaml down
+```
+
+### Design Characteristics
+
+- **Lock-free hot path**: Router access uses atomic pointer loads
+- **RWMutex for reads**: Route matching allows unlimited parallel readers
+- **Zero-allocation routing**: No heap allocations per request
+- **Connection pooling**: Shared HTTP transport with keep-alive
+- **Buffer pooling**: Reusable buffers for proxy and passthrough
 
 ## Building
 
