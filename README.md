@@ -24,9 +24,9 @@ A lightweight reverse proxy that reads Docker Compose files and routes traffic b
 docker compose -f example-compose.yaml up --build
 
 # Test routing
-curl -H "Host: example.com" http://localhost:8080/        # → nginx
-curl -H "Host: example.com" http://localhost:8080/api     # → api service
-curl -I -H "Host: www.example.com" http://localhost:8080/ # → 301 redirect
+curl -H "Host: example.com" http://localhost:9999/        # → nginx
+curl -H "Host: example.com" http://localhost:9999/api     # → api service
+curl -I -H "Host: www.example.com" http://localhost:9999/ # → 301 redirect
 ```
 
 For local development without Docker:
@@ -532,17 +532,24 @@ docker compose kill -s HUP liteproxy
 
 ### Adding a New Service
 
+**Single-project setup** (all services in one compose file):
 ```bash
 # 1. Add service to compose.yaml with liteproxy labels
 # 2. Start the new service
 docker compose up -d new-service
-
-# 3. Liteproxy auto-reloads (if LITEPROXY_WATCH=true)
-#    Or send: docker compose kill -s HUP liteproxy
-
-# 4. Verify
+# 3. Liteproxy auto-reloads — verify with:
 docker compose logs liteproxy | grep "reloaded"
 ```
+
+**Multi-project setup** (separate compose files per project):
+```bash
+# 1. Add route to liteproxy's compose.yaml
+# 2. Start the new project (joins liteproxy network)
+cd new-project && docker compose up -d
+# 3. Liteproxy auto-reloads — no restart needed
+```
+
+See [Multi-Project Networking](#multi-project-networking) for full setup instructions.
 
 ### Performance During Reload
 

@@ -1,5 +1,5 @@
-# Example: Run with docker compose -f example-compose.yaml up
-# Then test with: curl -H "Host: example.com" http://localhost:8080/
+# Example: Run with docker compose -f example-compose.yaml up --build
+# Then test with: curl -H "Host: example.com" http://localhost:9999/
 
 services:
   liteproxy:
