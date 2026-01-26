@@ -243,41 +243,46 @@ Liteproxy is configured via environment variables:
 
 ## Multi-Project Networking
 
-When running multiple projects (each with their own compose file), liteproxy needs to connect to each project's network while keeping projects isolated from each other.
+Run multiple projects on one server with true hot reload — no liteproxy restart needed when adding new projects.
 
 ### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        Liteproxy                             │
-│              Connected to ALL project networks               │
-└─────────────────────────────────────────────────────────────┘
-         │                    │                    │
-         ▼                    ▼                    ▼
-┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐
-│  project_a_net  │  │  project_b_net  │  │  project_c_net  │
-│   (isolated)    │  │   (isolated)    │  │   (isolated)    │
-│                 │  │                 │  │                 │
-│  ┌───────────┐  │  │  ┌───────────┐  │  │  ┌───────────┐  │
-│  │  webapp   │  │  │  │    api    │  │  │  │   blog    │  │
-│  │  db       │  │  │  │  redis    │  │  │  │  mysql    │  │
-│  └───────────┘  │  │  └───────────┘  │  │  └───────────┘  │
-└─────────────────┘  └─────────────────┘  └─────────────────┘
+│                     liteproxy network                        │
+│                    (shared routing layer)                    │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
+│  │liteproxy │  │  webapp  │  │   api    │  │   blog   │    │
+│  └──────────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘    │
+└─────────────────────┼─────────────┼─────────────┼──────────┘
+                      │             │             │
+              ┌───────┴───┐   ┌─────┴─────┐   ┌───┴───────┐
+              │project-a  │   │project-b  │   │project-c  │
+              │(private)  │   │(private)  │   │(private)  │
+              │           │   │           │   │           │
+              │  ┌─────┐  │   │  ┌─────┐  │   │  ┌─────┐  │
+              │  │ db  │  │   │  │redis│  │   │  │mysql│  │
+              │  └─────┘  │   │  └─────┘  │   │  └─────┘  │
+              └───────────┘   └───────────┘   └───────────┘
 ```
 
-Each project is isolated — `project_a` cannot reach `project_b`'s services. Only liteproxy bridges them.
+- **liteproxy network**: Shared network for routing. All routable services join this.
+- **project-* networks**: Private networks for internal services (databases, caches). Isolated from other projects.
+- **Routable services**: Join both networks (liteproxy + private)
+- **Internal services**: Join only private network (not accessible from outside)
 
 ### Setup Instructions
 
-**Step 1: Create a shared network for liteproxy**
+**Step 1: Create the liteproxy network**
 
 ```bash
-docker network create liteproxy-net
+docker network create liteproxy
 ```
 
-**Step 2: Configure liteproxy to use external networks**
+**Step 2: Configure liteproxy**
 
-Create `liteproxy-compose.yaml`:
+`liteproxy/compose.yaml`:
 
 ```yaml
 services:
@@ -287,7 +292,7 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./routes.yaml:/etc/liteproxy/compose.yaml:ro
+      - ./compose.yaml:/etc/liteproxy/compose.yaml:ro
       - ./certs:/certs
     environment:
       LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
@@ -295,20 +300,59 @@ services:
       LITEPROXY_ACME_EMAIL: you@example.com
       LITEPROXY_WATCH: "true"
     networks:
-      - liteproxy-net
-      - projecta-net
-      - projectb-net
+      - liteproxy
 
 networks:
-  liteproxy-net:
-    external: true
-  projecta-net:
-    external: true
-  projectb-net:
+  liteproxy:
     external: true
 ```
 
-**Step 3: Configure each project with its own network**
+**Step 3: Add routes to liteproxy's compose file**
+
+Liteproxy reads routes from its own compose file. Add service entries with labels for each routable service:
+
+`liteproxy/compose.yaml` (updated):
+
+```yaml
+services:
+  liteproxy:
+    image: liteproxy:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./compose.yaml:/etc/liteproxy/compose.yaml:ro
+      - ./certs:/certs
+    environment:
+      LITEPROXY_COMPOSE_FILE: /etc/liteproxy/compose.yaml
+      LITEPROXY_HTTPS_ENABLED: "true"
+      LITEPROXY_ACME_EMAIL: you@example.com
+      LITEPROXY_WATCH: "true"
+    networks:
+      - liteproxy
+
+  # Routes — service names must match container names on liteproxy network
+  webapp:
+    labels:
+      liteproxy.host: "projecta.com"
+      liteproxy.port: "8080"
+      liteproxy.redirect_from: "www.projecta.com"
+
+  api:
+    labels:
+      liteproxy.host: "projectb.com"
+      liteproxy.port: "3000"
+      liteproxy.passthrough: "true"
+      liteproxy.port.http: "80"
+
+networks:
+  liteproxy:
+    external: true
+```
+
+**Step 4: Configure projects to join liteproxy network**
+
+Each project joins the shared `liteproxy` network for routable services, plus their own private network for internal services.
 
 Project A (`project-a/compose.yaml`):
 
@@ -316,17 +360,21 @@ Project A (`project-a/compose.yaml`):
 services:
   webapp:
     image: webapp:latest
+    container_name: webapp  # Must match service name in liteproxy's routes
     networks:
-      - projecta-net
+      - liteproxy    # Routable — liteproxy can reach this
+      - private      # Can talk to db
 
   db:
     image: postgres:alpine
     networks:
-      - projecta-net
+      - private      # Internal only — not routable
 
 networks:
-  projecta-net:
-    name: projecta-net  # Explicit name prevents prefixing
+  liteproxy:
+    external: true   # Shared network, created in Step 1
+  private:
+    # Local to this project, auto-created
 ```
 
 Project B (`project-b/compose.yaml`):
@@ -335,87 +383,95 @@ Project B (`project-b/compose.yaml`):
 services:
   api:
     image: api:latest
+    container_name: api  # Must match service name in liteproxy's routes
     networks:
-      - projectb-net
+      - liteproxy
+      - private
 
   redis:
     image: redis:alpine
     networks:
-      - projectb-net
+      - private
 
 networks:
-  projectb-net:
-    name: projectb-net  # Explicit name prevents prefixing
+  liteproxy:
+    external: true
+  private:
 ```
 
-**Step 4: Create a routes file for liteproxy**
+**Step 5: Start services**
 
-`routes.yaml` (this is what liteproxy reads for routing):
+```bash
+# 1. Create liteproxy network (once)
+docker network create liteproxy
+
+# 2. Start liteproxy
+cd liteproxy && docker compose up -d
+
+# 3. Start projects (any order, any time)
+cd project-a && docker compose up -d
+cd project-b && docker compose up -d
+```
+
+### Adding a New Project (Zero Downtime)
+
+1. Add service entry to liteproxy's `compose.yaml` (just the labels, no image needed)
+2. Create project compose file that joins the `liteproxy` network
+3. Start the project: `docker compose up -d`
+4. Liteproxy hot reloads and starts routing immediately
+
+**Liteproxy's compose.yaml** (add new services here):
 
 ```yaml
 services:
-  # Project A routes
+  liteproxy:
+    # ... liteproxy config ...
+
+  # Route definitions (no image needed, just labels)
   webapp:
     labels:
       liteproxy.host: "projecta.com"
       liteproxy.port: "8080"
-      liteproxy.redirect_from: "www.projecta.com"
 
-  # Project B routes
   api:
     labels:
       liteproxy.host: "projectb.com"
       liteproxy.port: "3000"
-      liteproxy.passthrough: "true"
-      liteproxy.port.http: "80"
+
+  # Add new projects here — hot reload picks them up
+  newproject:
+    labels:
+      liteproxy.host: "newproject.com"
+      liteproxy.port: "8080"
 ```
 
-**Step 5: Start everything in order**
+**Why this works**: Liteproxy parses the compose file for service names and labels. Docker resolves service names via DNS on the shared network. So `webapp` in the routes file resolves to the `webapp` container because they're on the same `liteproxy` network.
 
 ```bash
-# 1. Create networks first
-docker network create liteproxy-net
-docker network create projecta-net
-docker network create projectb-net
-
-# 2. Start backend projects
-cd project-a && docker compose up -d
-cd project-b && docker compose up -d
-
-# 3. Start liteproxy last
-cd liteproxy && docker compose -f liteproxy-compose.yaml up -d
+# Adding a new project:
+# 1. Edit liteproxy's compose.yaml, add service with labels
+# 2. Start the new project
+cd new-project && docker compose up -d
+# 3. Liteproxy auto-reloads (LITEPROXY_WATCH=true) — no restart needed
 ```
-
-### Adding a New Project
-
-When adding a new project:
-
-1. Create the network: `docker network create newproject-net`
-2. Add the network to liteproxy's compose file (networks section)
-3. Add routes to `routes.yaml`
-4. Start the new project: `cd new-project && docker compose up -d`
-5. Restart liteproxy to pick up new network: `docker compose -f liteproxy-compose.yaml up -d`
-
-Or with hot reload (if `LITEPROXY_WATCH=true`):
-- Edit `routes.yaml` — routes update automatically
-- But network changes still require restarting liteproxy
 
 ### AI Setup Instructions
 
 When configuring liteproxy for a new server or project, follow this exact pattern:
 
-1. **Network naming**: Use explicit `name:` in networks to prevent Docker from prefixing with project name
-2. **External networks**: All networks in liteproxy's compose must be `external: true`
-3. **Routes file**: Keep routes in a separate file from liteproxy's compose (e.g., `routes.yaml`)
-4. **Service names in routes**: Must match the actual service names in each project's compose file
-5. **Never use default networks**: Always define explicit networks for isolation
-6. **Order matters**: Create networks → Start backends → Start liteproxy
+1. **One shared network**: Create `liteproxy` network once (`docker network create liteproxy`)
+2. **Routes in liteproxy's compose**: Add `liteproxy.*` labels to liteproxy's compose file (not project files)
+3. **Service names = container names**: Route service names must match `container_name` in project compose
+4. **External network declaration**: Every project declares `liteproxy` network as `external: true`
+5. **Private networks**: Use a local `private` network for internal services (db, redis, etc.)
+6. **Dual network for routable services**: Routable containers join both `liteproxy` and `private`
 
 Common mistakes to avoid:
-- ❌ Using `default` network (no isolation)
-- ❌ Omitting `name:` on networks (causes prefixing like `projecta_projecta-net`)
-- ❌ Starting liteproxy before creating all networks
-- ❌ Putting route labels in liteproxy's own compose instead of routes file
+- ❌ Putting labels in project compose files (liteproxy only reads its own compose file)
+- ❌ Mismatched names (route service name must match container_name on the network)
+- ❌ Creating separate networks per project that liteproxy must join (breaks hot reload)
+- ❌ Putting internal services (db, redis) on the liteproxy network (security risk)
+- ❌ Forgetting `external: true` on liteproxy network (creates duplicate networks)
 
 ## Running Behind a Load Balancer
 
